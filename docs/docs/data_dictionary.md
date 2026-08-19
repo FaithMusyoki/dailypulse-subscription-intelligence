@@ -3,7 +3,9 @@
 ## Subscription Intelligence — Data Dictionary
 
 **Project:** DAILYPULSE Subscription Intelligence
+
 **Version:** 1.0
+
 **Database:** PostgreSQL
 
 ---
