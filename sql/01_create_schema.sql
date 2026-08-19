@@ -210,7 +210,7 @@ CREATE TABLE subscriptions (
     -- Individual subscriptions do not use seats.
     CONSTRAINT chk_subscription_seats
         CHECK (
-            (organisation_id IS NOT NULL AND seats_purchased > 0)
+            (organisation_id IS NOT NULL AND seats_purchased >= 10)
             OR
             (organisation_id IS NULL AND seats_purchased IS NULL)
         ),
