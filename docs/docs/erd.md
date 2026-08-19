@@ -8,32 +8,26 @@
 
 **Database:** PostgreSQL
 
-**Purpose:** Define the core relational data model required to support subscription, revenue, customer lifecycle, corporate account and acquisition analysis.
-
 ---
 
-## 1. Overview
+## 1. Purpose
 
-The DAILYPULSE Subscription Intelligence database is designed around the customer subscription lifecycle.
+This document defines the final v1 relational structure for the DAILYPULSE MEDIA Subscription Intelligence database.
 
-The model separates customers, products, plans, subscriptions, payments and lifecycle events so that historical customer behaviour can be preserved rather than overwritten.
+The model supports:
 
-It also supports both:
+* Individual customers
+* Organisation subscriptions
+* Subscription plans
+* Payments
+* Subscription lifecycle events
+* Free trials
+* Marketing acquisition
+* Customer engagement
+* Customer support activity
+* Organisation seat utilisation
 
-* Individual subscriptions
-* Corporate subscriptions
-
-The initial model contains nine core entities:
-
-1. Customers
-2. Products
-3. Plans
-4. Subscriptions
-5. Subscription Events
-6. Payments
-7. Corporate Accounts
-8. Corporate Users
-9. Marketing Touchpoints
+The v1 model contains 12 core tables.
 
 ---
 
@@ -43,377 +37,245 @@ The initial model contains nine core entities:
 erDiagram
 
     CUSTOMERS {
-        string customer_id PK
-        string first_name
-        string last_name
-        string email
+        varchar customer_id PK
+        varchar first_name
+        varchar last_name
+        varchar email UK
         date signup_date
-        string country
-        string customer_status
+        varchar country
+        varchar account_status
     }
 
     PRODUCTS {
-        string product_id PK
-        string product_name
-        string product_category
+        varchar product_id PK
+        varchar product_name UK
+        varchar product_family
+        varchar target_segment
         boolean is_active
     }
 
     PLANS {
-        string plan_id PK
-        string product_id FK
-        string billing_frequency
-        decimal price
-        string currency
+        varchar plan_id PK
+        varchar product_id FK
+        varchar plan_name UK
+        varchar billing_frequency
         integer billing_period_days
+        decimal unit_price
+        varchar currency
         boolean is_active
     }
 
-    SUBSCRIPTIONS {
-        string subscription_id PK
-        string customer_id FK
-        string corporate_account_id FK
-        string plan_id FK
-        string owner_type
-        date start_date
-        date end_date
-        string status
-        boolean auto_renew
-        datetime created_at
+    ORGANISATIONS {
+        varchar organisation_id PK
+        varchar organisation_name
+        varchar organisation_type
+        varchar industry
+        integer organisation_size
+        date signup_date
+        varchar billing_contact_name
+        varchar billing_contact_email
+        varchar account_status
+        timestamp created_at
     }
 
-    SUBSCRIPTION_EVENTS {
-        string event_id PK
-        string subscription_id FK
-        string customer_id FK
-        string event_type
-        datetime event_date
-        string old_plan_id FK
-        string new_plan_id FK
-        string event_reason
+    SUBSCRIPTIONS {
+        varchar subscription_id PK
+        varchar customer_id FK
+        varchar organisation_id FK
+        varchar plan_id FK
+        date subscription_start_date
+        date current_period_start
+        date current_period_end
+        date subscription_end_date
+        varchar status
+        boolean auto_renew
+        timestamp cancellation_requested_at
+        varchar end_reason
+        integer seats_purchased
+        timestamp created_at
     }
 
     PAYMENTS {
-        string payment_id PK
-        string subscription_id FK
-        datetime payment_date
+        varchar payment_id PK
+        varchar subscription_id FK
+        timestamp payment_attempted_at
         decimal amount
-        string currency
-        string payment_status
-        string payment_method
-        string transaction_reference
+        varchar currency
+        varchar payment_status
+        varchar payment_method
+        varchar transaction_reference
+        varchar failure_reason
+        timestamp created_at
     }
 
-    CORPORATE_ACCOUNTS {
-        string corporate_account_id PK
-        string company_name
-        string industry
-        date signup_date
-        string billing_contact_email
-        string account_status
+    SUBSCRIPTION_EVENTS {
+        varchar event_id PK
+        varchar subscription_id FK
+        varchar related_subscription_id FK
+        varchar triggering_payment_id FK
+        varchar event_type
+        timestamp event_at
+        date period_start
+        date period_end
+        integer previous_seat_count
+        integer new_seat_count
+        varchar event_reason
+        timestamp created_at
     }
 
-    CORPORATE_USERS {
-        string corporate_user_id PK
-        string corporate_account_id FK
-        string email
+    ORGANISATION_USERS {
+        varchar organisation_user_id PK
+        varchar organisation_id FK
+        varchar subscription_id FK
+        varchar email
         date activation_date
-        string user_status
+        date deactivation_date
+        varchar user_status
+        timestamp created_at
     }
 
     MARKETING_TOUCHPOINTS {
-        string touchpoint_id PK
-        string customer_id FK
-        datetime touchpoint_date
-        string channel
-        string campaign_name
-        string touchpoint_type
+        varchar touchpoint_id PK
+        varchar customer_id FK
+        timestamp touchpoint_at
+        varchar channel
+        varchar campaign_name
+        varchar touchpoint_type
         decimal attributed_cost
+        timestamp created_at
+    }
+
+    TRIALS {
+        varchar trial_id PK
+        varchar customer_id FK
+        varchar product_id FK
+        timestamp trial_started_at
+        timestamp scheduled_end_at
+        timestamp actual_end_at
+        varchar trial_status
+        varchar converted_subscription_id FK
+        timestamp created_at
+    }
+
+    CUSTOMER_ENGAGEMENT {
+        varchar engagement_id PK
+        varchar customer_id FK
+        date engagement_date
+        integer sessions_count
+        integer articles_viewed
+        integer premium_articles_viewed
+        integer epaper_opens
+        decimal reading_minutes
+        timestamp created_at
+    }
+
+    SUPPORT_INTERACTIONS {
+        varchar interaction_id PK
+        varchar customer_id FK
+        varchar subscription_id FK
+        timestamp interaction_at
+        varchar channel
+        varchar issue_category
+        varchar resolution_status
+        timestamp resolved_at
+        timestamp created_at
     }
 
     PRODUCTS ||--o{ PLANS : has
 
-    PLANS ||--o{ SUBSCRIPTIONS : selected_for
-
     CUSTOMERS o|--o{ SUBSCRIPTIONS : owns
 
-    CORPORATE_ACCOUNTS o|--o{ SUBSCRIPTIONS : owns
+    ORGANISATIONS o|--o{ SUBSCRIPTIONS : owns
+
+    PLANS ||--o{ SUBSCRIPTIONS : selected_for
 
     SUBSCRIPTIONS ||--o{ PAYMENTS : generates
 
-    SUBSCRIPTIONS o|--o{ SUBSCRIPTION_EVENTS : records
+    SUBSCRIPTIONS ||--o{ SUBSCRIPTION_EVENTS : records
 
-    CUSTOMERS o|--o{ SUBSCRIPTION_EVENTS : generates
+    SUBSCRIPTIONS o|--o{ SUBSCRIPTION_EVENTS : related_subscription
+
+    PAYMENTS o|--o{ SUBSCRIPTION_EVENTS : triggers
+
+    ORGANISATIONS ||--o{ ORGANISATION_USERS : contains
+
+    SUBSCRIPTIONS ||--o{ ORGANISATION_USERS : provides_access
 
     CUSTOMERS ||--o{ MARKETING_TOUCHPOINTS : receives
 
-    CORPORATE_ACCOUNTS ||--o{ CORPORATE_USERS : contains
+    CUSTOMERS ||--o{ TRIALS : receives
 
-    PLANS o|--o{ SUBSCRIPTION_EVENTS : previous_plan
+    PRODUCTS ||--o{ TRIALS : trialled_as
 
-    PLANS o|--o{ SUBSCRIPTION_EVENTS : new_plan
+    SUBSCRIPTIONS o|--o{ TRIALS : converted_from
+
+    CUSTOMERS ||--o{ CUSTOMER_ENGAGEMENT : generates
+
+    CUSTOMERS ||--o{ SUPPORT_INTERACTIONS : creates
+
+    SUBSCRIPTIONS o|--o{ SUPPORT_INTERACTIONS : relates_to
 ```
 
 ---
 
-## 3. Entity Definitions
+## 3. Core Data Flow
 
-### Customers
+At a high level, the DAILYPULSE MEDIA data model works like this:
 
-The `CUSTOMERS` table contains individual registered users of DAILYPULSE MEDIA.
+```text
+CUSTOMER
+   │
+   ├── MARKETING TOUCHPOINTS
+   │
+   ├── FREE TRIAL
+   │       │
+   │       └── may convert into
+   │
+   ├── SUBSCRIPTION
+   │       │
+   │       ├── PAYMENTS
+   │       │
+   │       ├── SUBSCRIPTION EVENTS
+   │       │
+   │       └── SUPPORT INTERACTIONS
+   │
+   └── CUSTOMER ENGAGEMENT
+```
 
-Each customer receives a unique `customer_id`.
+For organisations:
 
-A customer may have multiple subscriptions over time, allowing historical subscription behaviour to be preserved.
-
-Examples include customers who:
-
-* Begin with a Daily plan and later move to Monthly
-* Upgrade from Digital Basic to Digital Premium
-* Churn and later reactivate
-* Hold multiple subscriptions at different points in time
+```text
+ORGANISATION
+      │
+      ├── SUBSCRIPTION
+      │       │
+      │       ├── PAYMENTS
+      │       └── SUBSCRIPTION EVENTS
+      │
+      └── ORGANISATION USERS
+```
 
 ---
 
+## 4. Product and Plan Structure
+
+DAILYPULSE MEDIA separates products from their purchasable billing plans.
+
 ### Products
-
-The `PRODUCTS` table contains the core DAILYPULSE MEDIA subscription products.
-
-Examples include:
 
 * Digital Basic
 * Digital Premium
-* Daily ePaper
+* ePaper
 * Weekend ePaper
 * Student Digital
 * Corporate ePaper
 
-A product describes **what the customer is purchasing**.
+### Product Families
 
-It does not define how frequently the customer is billed.
+* Digital News
+* ePaper
 
----
-
-### Plans
-
-The `PLANS` table contains the individual purchasable versions of each product.
-
-For example:
-
-**Digital Premium** is a product.
-
-The following are separate plans:
-
-* Digital Premium Weekly
-* Digital Premium Monthly
-* Digital Premium Annual
-
-Each plan therefore combines:
-
-* Product
-* Billing frequency
-* Price
-* Billing period
-
-A single product may have multiple plans.
-
----
-
-### Subscriptions
-
-The `SUBSCRIPTIONS` table records actual subscriptions purchased by customers or corporate accounts.
-
-Each subscription references one plan.
-
-A subscription may belong to either:
-
-1. An individual customer, or
-2. A corporate account
-
-The `owner_type` field identifies the type of subscriber.
-
-For an individual subscription:
-
-```text
-owner_type = individual
-customer_id = CUST001
-corporate_account_id = NULL
-```
-
-For a corporate subscription:
-
-```text
-owner_type = corporate
-customer_id = NULL
-corporate_account_id = CORP001
-```
-
-Only one subscription owner should exist for each subscription record.
-
-In the PostgreSQL implementation, a validation rule should ensure that a subscription cannot simultaneously belong to both an individual customer and a corporate account.
-
----
-
-### Subscription Events
-
-The `SUBSCRIPTION_EVENTS` table preserves important changes that occur throughout the subscriber lifecycle.
-
-Possible event types include:
-
-* trial_started
-* trial_converted
-* subscription_started
-* renewed
-* upgraded
-* downgraded
-* billing_cycle_changed
-* cancelled
-* expired
-* churned
-* reactivated
-
-This table makes it possible to reconstruct customer journeys over time.
-
-For example:
-
-```text
-Free Trial
-    ↓
-Digital Basic Monthly
-    ↓
-Renewal
-    ↓
-Digital Premium Monthly
-    ↓
-Renewal
-    ↓
-Cancellation
-```
-
-The `old_plan_id` and `new_plan_id` fields allow migration events to record where a customer moved from and where they moved to.
-
-For example:
-
-```text
-event_type = upgraded
-old_plan_id = Digital Basic Monthly
-new_plan_id = Digital Premium Monthly
-```
-
-Some early lifecycle events, such as `trial_started`, may occur before a paid subscription exists.
-
-For this reason, `subscription_id` may be empty for certain pre-subscription events while the event remains linked to the customer through `customer_id`.
-
----
-
-### Payments
-
-The `PAYMENTS` table records payment attempts associated with subscriptions.
-
-It includes both:
-
-* Successful payments
-* Failed payments
-
-Capturing failed payments is important because they may eventually contribute to involuntary churn.
-
-The payments table will support analysis including:
-
-* Subscription revenue
-* Failed payment rates
-* Revenue by product
-* Revenue by billing frequency
-* ARPU
-* Recurring revenue
-* Involuntary churn
-
-One subscription may generate multiple payment records over time.
-
----
-
-### Corporate Accounts
-
-The `CORPORATE_ACCOUNTS` table represents organisations purchasing DAILYPULSE MEDIA corporate subscriptions.
-
-Examples might include:
-
-* Banks
-* Universities
-* Government agencies
-* Professional firms
-* Large companies
-
-A corporate account may purchase either:
-
-* Monthly Corporate ePaper
-* Annual Corporate ePaper
-
-Corporate accounts are separate from individual customer records.
-
----
-
-### Corporate Users
-
-The `CORPORATE_USERS` table contains employees or authorised users receiving access through a corporate account.
-
-Each corporate user represents an activated corporate seat.
-
-For example:
-
-```text
-Corporate Account: Horizon Bank
-
-Seats Purchased: 50
-Corporate Users Activated: 43
-```
-
-This would produce:
-
-```text
-Seat Utilisation = 43 / 50 = 86%
-```
-
-The number of seats purchased will be stored at the corporate subscription level when the detailed data dictionary is developed.
-
-The `CORPORATE_USERS` table records the users who have actually activated those seats.
-
----
-
-### Marketing Touchpoints
-
-The `MARKETING_TOUCHPOINTS` table captures customer interactions with acquisition and marketing channels.
-
-Examples include:
-
-* Organic Search
-* Email
-* Paid Search
-* Paid Social
-* Social Media
-* Referral
-* Affiliate / Partner
-* Promotional Campaign
-* Campus Activation
-
-A customer may have multiple marketing touchpoints before or after becoming a subscriber.
-
-This enables analysis beyond basic acquisition counts.
-
-For example, the business may determine that:
-
-> Paid Social generates more subscribers, but Organic Search customers demonstrate stronger retention and higher lifetime value.
-
-The `attributed_cost` field provides a working basis for customer acquisition cost analysis within the synthetic dataset.
-
----
-
-## 4. Core Relationships
-
-### Products → Plans
-
-**One product can have many plans.**
-
-Example:
+### Example Relationship
 
 ```text
 Digital Basic
@@ -423,231 +285,351 @@ Digital Basic
     └── Annual
 ```
 
----
+```text
+ePaper
+    ├── Daily
+    ├── Weekly
+    ├── Monthly
+    └── Annual
+```
 
-### Plans → Subscriptions
+```text
+Weekend ePaper
+    ├── Weekly
+    └── Monthly
+```
 
-**One plan can be selected by many subscriptions.**
+```text
+Corporate ePaper
+    ├── Monthly
+    └── Annual
+```
 
-For example, thousands of customers may subscribe to Digital Premium Monthly.
-
----
-
-### Customers → Subscriptions
-
-**One individual customer can have zero or many subscriptions over time.**
-
-A subscription may have no `customer_id` when it belongs to a corporate account.
-
----
-
-### Corporate Accounts → Subscriptions
-
-**One corporate account can have zero or many subscriptions over time.**
-
-A corporate subscription will not have an individual `customer_id`.
+Corporate ePaper pricing is calculated on a per-seat basis.
 
 ---
 
-### Subscriptions → Payments
+## 5. Subscription Ownership
 
-**One subscription can generate many payment records.**
+Each subscription belongs to exactly one owner.
+
+It may belong to:
+
+* an individual customer; or
+* an organisation.
+
+For an individual subscription:
+
+```text
+customer_id = populated
+organisation_id = NULL
+```
+
+For an organisation subscription:
+
+```text
+customer_id = NULL
+organisation_id = populated
+```
+
+A subscription must never belong to both.
+
+---
+
+## 6. Subscription History
+
+One subscription record represents one continuous period on one specific plan.
+
+A normal renewal does not create a new subscription record.
+
+A plan change does create a new subscription record.
 
 Example:
 
 ```text
-Monthly Subscription
-    ├── January Payment
-    ├── February Payment
-    ├── March Payment
-    └── April Payment
+SUB001
+Digital Basic Monthly
+Jan 01 → Mar 31
+
+        ↓ plan change
+
+SUB002
+Digital Premium Monthly
+Apr 01 → Jun 30
+
+        ↓ plan change
+
+SUB003
+Digital Premium Annual
+Jul 01 → Ongoing
 ```
+
+Historical subscription records are preserved.
 
 ---
 
-### Subscriptions → Subscription Events
+## 7. Subscription Events
 
-**One subscription can generate many lifecycle events.**
+`SUBSCRIPTION_EVENTS` records meaningful lifecycle changes.
 
 Examples include:
 
+* subscription started
+* renewal
+* cancellation requested
+* cancellation reversed
+* plan changed
+* past due started
+* past due resolved
+* subscription ended
+* reactivation
+* organisation seat change
+
+Payment attempts themselves belong in `PAYMENTS`.
+
+A payment may optionally trigger a subscription event through:
+
 ```text
-Started
-Renewed
-Upgraded
-Downgraded
-Cancelled
-Churned
+triggering_payment_id
+```
+
+Example:
+
+```text
+Failed Payment
+      ↓
+Past Due Started
 ```
 
 ---
 
-### Customers → Marketing Touchpoints
+## 8. Cancellation and Churn
 
-**One customer can have many marketing touchpoints.**
+Cancellation and churn are treated separately.
 
-This allows DAILYPULSE MEDIA to reconstruct customer acquisition journeys and evaluate marketing effectiveness.
+A cancellation request represents **intent to churn**.
 
----
+A customer may request cancellation while still retaining access until the end of the current paid billing period.
 
-### Corporate Accounts → Corporate Users
+Churn itself is not stored directly.
 
-**One corporate account can contain many corporate users.**
+It is derived using:
 
-Corporate users consume the seats purchased under a corporate subscription.
+* `subscription_end_date`
+* `end_reason`
+* subsequent subscription activity
 
----
-
-## 5. Key Modelling Decisions
-
-### Preserve History
-
-Subscription changes should never overwrite historical information.
-
-If a customer changes from:
+This allows the database to distinguish between:
 
 ```text
-Digital Basic Monthly
+Plan ended because of upgrade
+→ NOT CHURN
 ```
 
-to:
+and:
 
 ```text
-Digital Premium Monthly
+Plan ended because of voluntary cancellation
+→ no replacement subscription
+→ VOLUNTARY CHURN
 ```
-
-the database should retain evidence of both states and record the migration as an event.
 
 ---
 
-### Separate Products from Plans
+## 9. Payments
 
-Products and plans serve different purposes.
+Each row in `PAYMENTS` represents one payment attempt.
+
+A failed payment must never be overwritten as successful.
+
+Example:
 
 ```text
-PRODUCT
-Digital Premium
+PAY001
+KES 800
+failed
 
-PLANS
-Digital Premium Weekly
-Digital Premium Monthly
-Digital Premium Annual
+PAY002
+KES 800
+successful
 ```
 
-This structure avoids repeating product information unnecessarily and makes pricing and billing analysis easier.
+Both payment attempts remain in the database.
+
+Revenue is derived from successful payments only.
+
+For organisation subscriptions, payment amounts represent the total amount charged across all purchased seats.
 
 ---
 
-### Separate Subscriptions from Payments
+## 10. Organisation Model
 
-A subscription represents the commercial relationship.
+The database uses `ORGANISATIONS` rather than corporate accounts because Corporate ePaper may be purchased by:
 
-A payment represents a financial transaction.
+* Corporates
+* Universities
+* Government institutions
+* NGOs
+* Professional associations
+* Other institutions
 
-One subscription may therefore have many payments.
+The commercial product remains named:
 
-Keeping the two separate allows failed payments, successful renewals and revenue history to be analysed independently.
+**Corporate ePaper**
 
----
+`organisation_size` stores the estimated addressable population.
 
-### Support Both Individual and Corporate Customers
-
-The same subscription structure will support both subscriber types.
-
-Each subscription belongs to either:
-
-```text
-Individual Customer
-```
-
-or:
-
-```text
-Corporate Account
-```
-
-but never both simultaneously.
+Organisation band is derived from that value rather than stored.
 
 ---
 
-### Track Events Instead of Overwriting Status History
+## 11. Organisation Users
 
-The current subscription status may tell us:
+`ORGANISATION_USERS` represents activated seats under an organisation subscription.
 
-```text
-status = cancelled
-```
+One active organisation user represents one activated seat.
 
-but this alone does not explain the customer's journey.
-
-The event table allows us to understand:
+Seat utilisation can therefore be calculated as:
 
 ```text
-Trial
-→ Subscription
-→ Renewal
-→ Upgrade
-→ Renewal
-→ Failed Payment
-→ Cancellation
+Active Organisation Users
+-------------------------
+Seats Purchased
 ```
 
-This event history will later support migration analysis, churn modelling and customer lifecycle analysis.
+Organisation user history is preserved even after access is deactivated.
 
 ---
 
-## 6. Future Extensions
+## 12. Free Trials
 
-The first version of the database intentionally focuses on the core subscription business.
+Free trials are stored separately from paid subscriptions.
 
-Additional entities may be introduced later as analytical requirements become more advanced.
+Business rules:
 
-Potential future tables include:
+* Maximum duration: 7 days
+* One free trial per individual customer
+* Only Digital News products are eligible
+* Eligible products:
 
-### Customer Engagement
+  * Digital Basic
+  * Digital Premium
+  * Student Digital
+* ePaper products are not trial eligible
+* Organisations are not trial eligible
 
-Possible behavioural data such as:
+A trial may end through:
 
-* Articles viewed
-* Sessions
-* Login frequency
-* Reading time
-* Content categories
-* Days since last activity
+* conversion
+* expiry
+* cancellation
 
-This data could later improve churn prediction and customer segmentation.
+If converted, it links directly to the resulting paid subscription through:
 
-### Support Interactions
-
-Possible customer-service data including:
-
-* Support tickets
-* Complaint type
-* Resolution time
-* Cancellation enquiries
-* Billing issues
-
-This could help determine whether customer-service experiences are associated with churn.
-
-These tables are not required for the initial database implementation and will only be added when justified by a specific analytical requirement.
+```text
+converted_subscription_id
+```
 
 ---
 
-## 7. Next Stage
+## 13. Marketing Touchpoints
 
-Once the ERD is approved, the next step is to develop the **Data Dictionary**.
+Customers may have multiple marketing interactions.
 
-The Data Dictionary will define every field in the database, including:
+Examples:
 
-* Column name
-* Table
-* Description
-* Data type
-* Allowed values
-* Primary keys
-* Foreign keys
-* Nullable fields
-* Business rules
-* Example values
+* Organic Search
+* Paid Search
+* Organic Social
+* Paid Social
+* Email
+* Direct
+* Referral
+* Affiliate / Partner
+* Campus Activation
+* Promotional Campaign
 
-The Data Dictionary will then serve as the specification for generating the synthetic DAILYPULSE MEDIA dataset.
+Marketing touchpoints connect to customers rather than directly to subscriptions.
+
+This preserves the full acquisition journey.
+
+---
+
+## 14. Customer Engagement
+
+`CUSTOMER_ENGAGEMENT` stores daily behavioural activity for individual customers.
+
+Examples include:
+
+* sessions
+* articles viewed
+* premium articles viewed
+* ePaper opens
+* reading time
+
+One row represents one customer's recorded engagement on one day.
+
+Metrics such as:
+
+* days since last activity
+* 30-day engagement
+* engagement decline
+* churn risk
+
+are derived later rather than stored.
+
+---
+
+## 15. Support Interactions
+
+`SUPPORT_INTERACTIONS` captures lightweight customer support activity.
+
+Possible categories include:
+
+* billing
+* payment
+* access/login
+* technical
+* content
+* subscription change
+* cancellation enquiry
+
+This allows future churn analysis to test whether support behaviour is associated with customer loss.
+
+---
+
+## 16. Historical Data Principle
+
+The database is designed to preserve historical activity wherever possible.
+
+The following should never be silently overwritten:
+
+* historical subscription plans
+* failed payments
+* renewal periods
+* cancellation requests
+* cancellation reversals
+* plan changes
+* seat increases
+* seat decreases
+* deactivated organisation users
+
+Current state may change, but historical events and transactions remain available for analysis.
+
+---
+
+## 17. Version Status
+
+**DAILYPULSE MEDIA Data Model v1.0 — FROZEN**
+
+The next project stage is implementation of the PostgreSQL database schema.
+
+The schema will translate this model into:
+
+* tables
+* primary keys
+* foreign keys
+* unique constraints
+* check constraints
+* nullability rules
+* referential integrity
