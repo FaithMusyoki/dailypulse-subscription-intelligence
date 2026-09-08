@@ -46,8 +46,7 @@ np.random.seed(RANDOM_SEED)
 Faker.seed(RANDOM_SEED)
 
 rng = np.random.default_rng(RANDOM_SEED)
-fake = Faker("en_GB")
-
+fake_international = Faker("en_GB")
 
 # ============================================================
 # CUSTOMER ASSUMPTIONS
@@ -71,7 +70,88 @@ CUSTOMER_ACCOUNT_STATUS = {
     "closed": 0.02,
 }
 
+# ============================================================
+# SYNTHETIC NAME POOLS
+# ============================================================
 
+# These curated pools are used to make the synthetic customer
+# population better reflect DAILYPULSE's East African footprint.
+# They are simulation inputs, not demographic reference data.
+
+NAME_POOLS = {
+    "Kenya": {
+        "first_names": [
+            "Amina", "Brian", "Carol", "David", "Edwin", "Faith",
+            "Grace", "Ian", "James", "Jane", "Kevin", "Lilian",
+            "Mercy", "Michael", "Naomi", "Peter", "Samuel", "Sharon",
+            "Victor", "Wanjiku", "Brian", "Dennis", "Esther", "Joy",
+            "Kelvin", "Lydia", "Martin", "Michelle", "Paul", "Ruth"
+        ],
+        "last_names": [
+            "Mwangi", "Otieno", "Kamau", "Njoroge", "Wanjiku",
+            "Omondi", "Mutua", "Musyoki", "Kiptoo", "Cheruiyot",
+            "Maina", "Wafula", "Wambui", "Muthoni", "Onyango",
+            "Kariuki", "Ndungu", "Koech", "Muriuki", "Ochieng",
+            "Mugo", "Wekesa", "Njenga", "Wairimu", "Kimani"
+        ],
+    },
+
+    "Uganda": {
+        "first_names": [
+            "Aisha", "Andrew", "Brenda", "Daniel", "Doreen",
+            "Esther", "Ivan", "Joan", "Joseph", "Kevin",
+            "Lydia", "Martha", "Moses", "Patricia", "Peter",
+            "Rachel", "Robert", "Sarah", "Stephen", "Susan"
+        ],
+        "last_names": [
+            "Kato", "Nabirye", "Okello", "Nsubuga", "Namukasa",
+            "Ochieng", "Tumusiime", "Nakato", "Mugisha", "Ssemanda",
+            "Auma", "Kisembo", "Nanyonga", "Byaruhanga", "Akello"
+        ],
+    },
+
+    "Tanzania": {
+        "first_names": [
+            "Asha", "Baraka", "David", "Farida", "Hassan",
+            "Irene", "Juma", "Joyce", "Kelvin", "Neema",
+            "Rehema", "Salma", "Samwel", "Shabani", "Sophia",
+            "Victor", "Zawadi", "Mariam", "Amani", "Joseph"
+        ],
+        "last_names": [
+            "Mushi", "Mwinyi", "Mrema", "Msuya", "Mwakalinga",
+            "Mhando", "Mfinanga", "Massawe", "Kweka", "Mollel",
+            "Mwakipesile", "Kessy", "Macha", "Mrope", "Ngowi"
+        ],
+    },
+
+    "Rwanda": {
+        "first_names": [
+            "Aline", "Alice", "Claude", "Diane", "Eric",
+            "Esther", "Emmanuel", "Grace", "Jean", "Joseph",
+            "Kevin", "Marie", "Patrick", "Samuel", "Sandrine",
+            "Thierry", "Yvonne", "Claudine", "Eric", "Divine"
+        ],
+        "last_names": [
+            "Uwimana", "Niyonsenga", "Mugisha", "Habimana",
+            "Mukamana", "Nshimiyimana", "Nsengiyumva", "Iradukunda",
+            "Uwamahoro", "Munyaneza", "Ndayisaba", "Mutabazi",
+            "Nkurunziza", "Ingabire", "Bizimana"
+        ],
+    },
+}
+
+
+EAST_AFRICAN_FIRST_NAMES = [
+    name
+    for country in NAME_POOLS.values()
+    for name in country["first_names"]
+]
+
+EAST_AFRICAN_LAST_NAMES = [
+    name
+    for country in NAME_POOLS.values()
+    for name in country["last_names"]
+]
 # ============================================================
 # ORGANISATION ASSUMPTIONS
 # ============================================================
@@ -382,7 +462,44 @@ def generate_organisation_size(org_type):
     size = lower + position * (upper - lower)
 
     return int(round(size))
+    
+def generate_person_name(country):
+    """
+    Generate a synthetic name influenced by customer country.
 
+    East African markets primarily use curated regional name pools,
+    while a small proportion use international Faker names to avoid
+    making the population unrealistically uniform.
+
+    Other markets use international Faker-generated names.
+    """
+
+    if country in NAME_POOLS:
+
+        # Most names come from the relevant country pool.
+        # A small share remains internationally styled to preserve
+        # realistic diversity within each market.
+        if rng.random() < 0.90:
+
+            first_name = rng.choice(
+                NAME_POOLS[country]["first_names"]
+            )
+
+            last_name = rng.choice(
+                NAME_POOLS[country]["last_names"]
+            )
+
+        else:
+
+            first_name = fake_international.first_name()
+            last_name = fake_international.last_name()
+
+    else:
+
+        first_name = fake_international.first_name()
+        last_name = fake_international.last_name()
+
+    return first_name, last_name
 
 # ============================================================
 # GENERATE CUSTOMERS
@@ -414,14 +531,15 @@ def generate_customers():
 
     for i, customer_id in enumerate(customer_ids):
 
-        first_name = fake.first_name()
-        last_name = fake.last_name()
+    first_name, last_name = generate_person_name(
+        countries[i]
+    )
 
-        email = generate_customer_email(
-            first_name,
-            last_name,
-            customer_id
-        )
+    email = generate_customer_email(
+        first_name,
+        last_name,
+        customer_id
+    )
 
         records.append({
             "customer_id": customer_id,
@@ -475,8 +593,13 @@ def generate_organisations():
             org_type
         )
 
-        billing_first_name = fake.first_name()
-        billing_last_name = fake.last_name()
+        billing_first_name = rng.choice(
+            EAST_AFRICAN_FIRST_NAMES
+        )
+
+        billing_last_name = rng.choice(
+            EAST_AFRICAN_LAST_NAMES
+        )
 
         billing_contact_name = (
             f"{billing_first_name} {billing_last_name}"
