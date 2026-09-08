@@ -531,15 +531,15 @@ def generate_customers():
 
     for i, customer_id in enumerate(customer_ids):
 
-    first_name, last_name = generate_person_name(
-        countries[i]
-    )
+        first_name, last_name = generate_person_name(
+            countries[i]
+        )
 
-    email = generate_customer_email(
-        first_name,
-        last_name,
-        customer_id
-    )
+        email = generate_customer_email(
+            first_name,
+            last_name,
+            customer_id
+        )
 
         records.append({
             "customer_id": customer_id,
