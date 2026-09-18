@@ -614,7 +614,8 @@ def simulate_individual_segment(
     plan_id,
     start_date,
     first_channel,
-    from_trial
+    from_trial,
+    allow_plan_change=True
 ):
     """
     Simulate one continuous subscription period on one plan.
@@ -679,15 +680,23 @@ def simulate_individual_segment(
         ):
 
             outcome = "ended"
-            end_reason = "plan_change"
             end_date = current_end
 
-            next_plan_id = choose_next_plan(
+            selected_next_plan = choose_next_plan(
                 plan_id
             )
 
-            break
+            if allow_plan_change:
+                end_reason = "plan_change"
+                next_plan_id = selected_next_plan
 
+            else:
+                # Final permitted segment:
+                # do not create an unresolved plan change.
+                end_reason = "non_renewal"
+                next_plan_id = None
+
+            break
         if rng.random() > continuation:
 
             outcome = "ended"
@@ -1052,7 +1061,10 @@ def generate_individual_subscriptions(
                 plan_id,
                 start_date,
                 first_channel,
-                from_trial
+                from_trial,
+                allow_plan_change=(
+                    segment_number < 3
+                )
             )
 
             records.append(
@@ -1146,7 +1158,8 @@ def generate_individual_subscriptions(
                     new_plan_id,
                     reactivation_date,
                     first_channel,
-                    False
+                    False,
+                    allow_plan_change=False
                 )
 
                 records.append(
