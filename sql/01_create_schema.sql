@@ -281,7 +281,12 @@ CREATE TABLE payments (
                 'payment_declined',
                 'invalid_payment_details',
                 'timeout',
-                'other'
+                'other',
+                'network_error',
+                'customer_timeout',
+                'card_declined',
+                'bank_rejection',
+                'processing_error'
             )
         ),
 
