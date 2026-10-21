@@ -1334,3 +1334,472 @@ LEFT JOIN monthly_payments AS mp
 
 
 ORDER BY m.month_start;
+
+-- ============================================================
+-- ANALYTICS VIEW 05: ACQUISITION PERFORMANCE
+--
+-- Grain:
+-- One row per acquisition channel
+--
+-- Attribution model:
+-- First-touch attribution.
+--
+-- Each customer is assigned to the channel associated with
+-- their earliest recorded marketing touchpoint.
+-- ============================================================
+
+CREATE OR REPLACE VIEW vw_acquisition_performance AS
+
+WITH
+
+
+-- ============================================================
+-- 1. RANK CUSTOMER TOUCHPOINTS
+--
+-- Rank every customer's marketing interactions
+-- chronologically so we can identify the first touch.
+-- ============================================================
+
+ranked_touchpoints AS (
+
+    SELECT
+
+        mt.touchpoint_id,
+        mt.customer_id,
+        mt.touchpoint_at,
+        mt.channel,
+        mt.campaign_name,
+        mt.touchpoint_type,
+        mt.attributed_cost,
+
+        ROW_NUMBER() OVER (
+
+            PARTITION BY mt.customer_id
+
+            ORDER BY
+                mt.touchpoint_at,
+                mt.touchpoint_id
+
+        ) AS touchpoint_rank
+
+    FROM marketing_touchpoints AS mt
+),
+
+
+-- ============================================================
+-- 2. FIRST TOUCH PER CUSTOMER
+--
+-- Exactly one acquisition channel per customer.
+-- ============================================================
+
+first_touch AS (
+
+    SELECT
+
+        customer_id,
+        touchpoint_id AS first_touchpoint_id,
+        touchpoint_at AS first_touch_at,
+        channel AS first_touch_channel,
+        campaign_name AS first_touch_campaign,
+        touchpoint_type AS first_touch_type
+
+    FROM ranked_touchpoints
+
+    WHERE touchpoint_rank = 1
+),
+
+
+-- ============================================================
+-- 3. OVERALL CHANNEL ACTIVITY
+--
+-- This describes all marketing activity recorded for each
+-- channel, not just first-touch interactions.
+-- ============================================================
+
+channel_activity AS (
+
+    SELECT
+
+        channel,
+
+        COUNT(*)
+            AS total_touchpoints,
+
+        COUNT(
+            DISTINCT customer_id
+        ) AS unique_touched_customers,
+
+        ROUND(
+            SUM(attributed_cost),
+            2
+        ) AS channel_attributed_cost
+
+    FROM marketing_touchpoints
+
+    GROUP BY channel
+),
+
+
+-- ============================================================
+-- 4. FIRST-TOUCH CUSTOMER OUTCOMES
+--
+-- Connect each customer's assigned acquisition channel to
+-- their downstream subscription lifecycle.
+-- ============================================================
+
+first_touch_outcomes AS (
+
+    SELECT
+
+        ft.first_touch_channel AS channel,
+
+
+        COUNT(*)
+            AS first_touch_customers,
+
+
+        COUNT(*) FILTER (
+            WHERE cl.ever_trialled = TRUE
+        ) AS trial_customers,
+
+
+        COUNT(*) FILTER (
+            WHERE cl.ever_converted_trial = TRUE
+        ) AS converted_trial_customers,
+
+
+        COUNT(*) FILTER (
+            WHERE cl.ever_subscribed = TRUE
+        ) AS paid_subscribers,
+
+
+        COUNT(*) FILTER (
+            WHERE cl.current_subscriber = TRUE
+        ) AS current_subscribers,
+
+
+        COUNT(*) FILTER (
+            WHERE cl.ever_had_payment_failure = TRUE
+        ) AS customers_with_payment_failure,
+
+
+        COUNT(*) FILTER (
+            WHERE cl.ever_reactivated = TRUE
+        ) AS reactivated_customers,
+
+
+        SUM(
+            cl.total_trials
+        ) AS total_trials,
+
+
+        ROUND(
+            SUM(
+                cl.lifetime_successful_payment_value
+            ),
+            2
+        ) AS observed_successful_payment_value
+
+
+    FROM first_touch AS ft
+
+
+    INNER JOIN vw_customer_lifecycle AS cl
+        ON ft.customer_id = cl.customer_id
+
+
+    GROUP BY ft.first_touch_channel
+)
+
+
+-- ============================================================
+-- 5. FINAL ACQUISITION PERFORMANCE OUTPUT
+-- ============================================================
+
+SELECT
+
+    ca.channel,
+
+
+    -- ========================================================
+    -- CHANNEL ACTIVITY
+    -- ========================================================
+
+    ca.total_touchpoints,
+
+    ca.unique_touched_customers,
+
+    ca.channel_attributed_cost,
+
+
+    -- ========================================================
+    -- FIRST-TOUCH ATTRIBUTION
+    -- ========================================================
+
+    COALESCE(
+        fto.first_touch_customers,
+        0
+    ) AS first_touch_customers,
+
+
+    ROUND(
+
+        (
+            COALESCE(
+                fto.first_touch_customers,
+                0
+            )::numeric
+
+            /
+
+            NULLIF(
+                SUM(
+                    COALESCE(
+                        fto.first_touch_customers,
+                        0
+                    )
+                ) OVER (),
+                0
+            )
+
+        ) * 100,
+
+        2
+
+    ) AS first_touch_customer_share_pct,
+
+
+    -- ========================================================
+    -- TRIAL FUNNEL
+    -- ========================================================
+
+    COALESCE(
+        fto.trial_customers,
+        0
+    ) AS trial_customers,
+
+
+    COALESCE(
+        fto.total_trials,
+        0
+    ) AS total_trials,
+
+
+    COALESCE(
+        fto.converted_trial_customers,
+        0
+    ) AS converted_trial_customers,
+
+
+    ROUND(
+
+        (
+            COALESCE(
+                fto.trial_customers,
+                0
+            )::numeric
+
+            /
+
+            NULLIF(
+                fto.first_touch_customers,
+                0
+            )
+
+        ) * 100,
+
+        2
+
+    ) AS trial_rate_pct,
+
+
+    ROUND(
+
+        (
+            COALESCE(
+                fto.converted_trial_customers,
+                0
+            )::numeric
+
+            /
+
+            NULLIF(
+                fto.trial_customers,
+                0
+            )
+
+        ) * 100,
+
+        2
+
+    ) AS trial_conversion_rate_pct,
+
+
+    -- ========================================================
+    -- PAID CONVERSION
+    -- ========================================================
+
+    COALESCE(
+        fto.paid_subscribers,
+        0
+    ) AS paid_subscribers,
+
+
+    ROUND(
+
+        (
+            COALESCE(
+                fto.paid_subscribers,
+                0
+            )::numeric
+
+            /
+
+            NULLIF(
+                fto.first_touch_customers,
+                0
+            )
+
+        ) * 100,
+
+        2
+
+    ) AS paid_conversion_rate_pct,
+
+
+    -- ========================================================
+    -- CURRENT SUBSCRIBER BASE
+    -- ========================================================
+
+    COALESCE(
+        fto.current_subscribers,
+        0
+    ) AS current_subscribers,
+
+
+    ROUND(
+
+        (
+            COALESCE(
+                fto.current_subscribers,
+                0
+            )::numeric
+
+            /
+
+            NULLIF(
+                fto.paid_subscribers,
+                0
+            )
+
+        ) * 100,
+
+        2
+
+    ) AS current_share_of_paid_pct,
+
+
+    -- ========================================================
+    -- LIFECYCLE QUALITY
+    -- ========================================================
+
+    COALESCE(
+        fto.customers_with_payment_failure,
+        0
+    ) AS customers_with_payment_failure,
+
+
+    COALESCE(
+        fto.reactivated_customers,
+        0
+    ) AS reactivated_customers,
+
+
+    -- ========================================================
+    -- COMMERCIAL VALUE
+    --
+    -- This is observed historical successful payment value
+    -- within the available dataset, not predicted LTV.
+    -- ========================================================
+
+    COALESCE(
+        fto.observed_successful_payment_value,
+        0
+    ) AS observed_successful_payment_value,
+
+
+    ROUND(
+
+        COALESCE(
+            fto.observed_successful_payment_value,
+            0
+        )
+
+        /
+
+        NULLIF(
+            fto.paid_subscribers,
+            0
+        ),
+
+        2
+
+    ) AS avg_payment_value_per_paid_subscriber,
+
+
+    -- ========================================================
+    -- ACQUISITION EFFICIENCY
+    --
+    -- Channel cost includes all recorded touchpoint costs
+    -- for that channel.
+    --
+    -- Paid subscribers and value are credited using
+    -- first-touch attribution.
+    -- ========================================================
+
+    ROUND(
+
+        ca.channel_attributed_cost
+
+        /
+
+        NULLIF(
+            fto.paid_subscribers,
+            0
+        ),
+
+        2
+
+    ) AS cost_per_paid_subscriber,
+
+
+    CASE
+
+        WHEN ca.channel_attributed_cost = 0
+            THEN NULL
+
+        ELSE ROUND(
+
+            COALESCE(
+                fto.observed_successful_payment_value,
+                0
+            )
+
+            / ca.channel_attributed_cost,
+
+            2
+        )
+
+    END AS payment_value_to_cost_ratio
+
+
+FROM channel_activity AS ca
+
+
+LEFT JOIN first_touch_outcomes AS fto
+    ON ca.channel = fto.channel
+
+
+ORDER BY
+    paid_subscribers DESC,
+    ca.channel;
