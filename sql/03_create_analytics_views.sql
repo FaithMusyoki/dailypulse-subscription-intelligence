@@ -638,3 +638,699 @@ LEFT JOIN payment_summary AS p
 
 LEFT JOIN event_summary AS e
     ON c.customer_id = e.customer_id;
+
+-- ============================================================
+-- ANALYTICS VIEW 04: MONTHLY SUBSCRIPTION METRICS
+--
+-- Grain:
+-- One row per calendar month
+--
+-- Purpose:
+-- Track subscriber growth, subscription lifecycle activity,
+-- payment performance and successful payment value over time.
+-- ============================================================
+
+CREATE OR REPLACE VIEW vw_monthly_subscription_metrics AS
+
+WITH
+
+
+-- ============================================================
+-- 1. ANALYTICAL DATE RANGE
+--
+-- Find the earliest and latest month containing subscription,
+-- payment or lifecycle-event activity.
+-- ============================================================
+
+activity_dates AS (
+
+    SELECT
+        subscription_start_date::date AS activity_date
+    FROM subscriptions
+
+
+    UNION ALL
+
+
+    SELECT
+        subscription_end_date::date AS activity_date
+    FROM subscriptions
+    WHERE subscription_end_date IS NOT NULL
+
+
+    UNION ALL
+
+
+    SELECT
+        payment_attempted_at::date AS activity_date
+    FROM payments
+
+
+    UNION ALL
+
+
+    SELECT
+        event_at::date AS activity_date
+    FROM subscription_events
+),
+
+
+date_bounds AS (
+
+    SELECT
+
+        DATE_TRUNC(
+            'month',
+            MIN(activity_date)
+        )::date AS first_month,
+
+        DATE_TRUNC(
+            'month',
+            MAX(activity_date)
+        )::date AS last_month
+
+    FROM activity_dates
+),
+
+
+-- ============================================================
+-- 2. CALENDAR MONTHS
+--
+-- Generate one row for every month in the reporting period,
+-- including months where a particular metric may be zero.
+-- ============================================================
+
+months AS (
+
+    SELECT
+
+        month_start::date AS month_start,
+
+        (
+            month_start
+            + INTERVAL '1 month'
+            - INTERVAL '1 day'
+        )::date AS month_end
+
+    FROM date_bounds
+
+    CROSS JOIN GENERATE_SERIES(
+        first_month,
+        last_month,
+        INTERVAL '1 month'
+    ) AS month_start
+),
+
+
+-- ============================================================
+-- 3. COMMON SUBSCRIBER KEY
+--
+-- Individuals and organisations use different identifiers.
+-- This creates one common analytical subscriber identifier.
+-- ============================================================
+
+subscription_base AS (
+
+    SELECT
+
+        sf.*,
+
+        CASE
+            WHEN sf.organisation_id IS NOT NULL
+                THEN 'ORG:' || sf.organisation_id
+
+            ELSE 'CUST:' || sf.customer_id
+
+        END AS subscriber_key
+
+    FROM vw_subscription_fact AS sf
+),
+
+
+-- ============================================================
+-- 4. FIRST PAID SUBSCRIPTION
+--
+-- Determine when each subscriber first became paid.
+-- This prevents plan changes/reactivations being mistaken
+-- for newly acquired subscribers.
+-- ============================================================
+
+first_subscription AS (
+
+    SELECT
+
+        subscriber_key,
+
+        MIN(subscription_start_date)
+            AS first_subscription_start_date
+
+    FROM subscription_base
+
+    GROUP BY subscriber_key
+),
+
+
+-- ============================================================
+-- 5. MONTHLY SUBSCRIPTION STARTS
+-- ============================================================
+
+subscription_starts AS (
+
+    SELECT
+
+        DATE_TRUNC(
+            'month',
+            sb.subscription_start_date
+        )::date AS month_start,
+
+
+        COUNT(*)
+            AS subscription_records_started,
+
+
+        COUNT(*) FILTER (
+            WHERE sb.subscriber_type = 'individual'
+        ) AS individual_subscription_records_started,
+
+
+        COUNT(*) FILTER (
+            WHERE sb.subscriber_type = 'organisation'
+        ) AS organisation_subscription_records_started,
+
+
+        COUNT(
+            DISTINCT sb.subscriber_key
+        ) FILTER (
+
+            WHERE sb.subscription_start_date
+                = fs.first_subscription_start_date
+
+        ) AS first_time_paid_subscribers,
+
+
+        COUNT(
+            DISTINCT sb.subscriber_key
+        ) FILTER (
+
+            WHERE sb.subscription_start_date
+                = fs.first_subscription_start_date
+
+              AND sb.subscriber_type = 'individual'
+
+        ) AS first_time_individual_subscribers,
+
+
+        COUNT(
+            DISTINCT sb.subscriber_key
+        ) FILTER (
+
+            WHERE sb.subscription_start_date
+                = fs.first_subscription_start_date
+
+              AND sb.subscriber_type = 'organisation'
+
+        ) AS first_time_organisation_subscribers
+
+
+    FROM subscription_base AS sb
+
+
+    INNER JOIN first_subscription AS fs
+        ON sb.subscriber_key = fs.subscriber_key
+
+
+    GROUP BY 1
+),
+
+
+-- ============================================================
+-- 6. MONTHLY SUBSCRIPTION ENDS
+-- ============================================================
+
+subscription_ends AS (
+
+    SELECT
+
+        DATE_TRUNC(
+            'month',
+            subscription_end_date
+        )::date AS month_start,
+
+
+        COUNT(*)
+            AS subscription_records_ended,
+
+
+        COUNT(*) FILTER (
+            WHERE end_reason = 'voluntary_cancel'
+        ) AS voluntary_cancellation_ends,
+
+
+        COUNT(*) FILTER (
+            WHERE end_reason = 'non_renewal'
+        ) AS non_renewal_ends,
+
+
+        COUNT(*) FILTER (
+            WHERE end_reason = 'plan_change'
+        ) AS plan_change_ends
+
+
+    FROM subscription_base
+
+    WHERE subscription_end_date IS NOT NULL
+
+    GROUP BY 1
+),
+
+
+-- ============================================================
+-- 7. MONTH-END ACTIVE SUBSCRIBER BASE
+--
+-- A subscription is active at month-end when:
+--
+-- start date <= month end
+-- AND
+-- end date is NULL OR end date >= month end
+-- ============================================================
+
+month_end_active AS (
+
+    SELECT
+
+        m.month_start,
+
+
+        COUNT(sb.subscription_id)
+            AS active_subscription_records,
+
+
+        COUNT(
+            DISTINCT sb.subscriber_key
+        ) AS active_subscribers,
+
+
+        COUNT(sb.subscription_id) FILTER (
+            WHERE sb.subscriber_type = 'individual'
+        ) AS active_individual_subscriptions,
+
+
+        COUNT(sb.subscription_id) FILTER (
+            WHERE sb.subscriber_type = 'organisation'
+        ) AS active_organisation_subscriptions,
+
+
+        COUNT(
+            DISTINCT sb.subscriber_key
+        ) FILTER (
+            WHERE sb.subscriber_type = 'individual'
+        ) AS active_individual_subscribers,
+
+
+        COUNT(
+            DISTINCT sb.subscriber_key
+        ) FILTER (
+            WHERE sb.subscriber_type = 'organisation'
+        ) AS active_organisation_subscribers
+
+
+    FROM months AS m
+
+
+    LEFT JOIN subscription_base AS sb
+
+        ON sb.subscription_start_date <= m.month_end
+
+        AND (
+            sb.subscription_end_date IS NULL
+            OR sb.subscription_end_date >= m.month_end
+        )
+
+
+    GROUP BY m.month_start
+),
+
+
+-- ============================================================
+-- 8. MONTHLY LIFECYCLE EVENTS
+-- ============================================================
+
+monthly_events AS (
+
+    SELECT
+
+        DATE_TRUNC(
+            'month',
+            event_at
+        )::date AS month_start,
+
+
+        COUNT(*) FILTER (
+            WHERE event_type = 'subscription_started'
+        ) AS subscription_started_events,
+
+
+        COUNT(*) FILTER (
+            WHERE event_type = 'renewed'
+        ) AS renewals,
+
+
+        COUNT(*) FILTER (
+            WHERE event_type = 'plan_changed'
+        ) AS plan_changes,
+
+
+        COUNT(*) FILTER (
+            WHERE event_type = 'reactivated'
+        ) AS reactivations,
+
+
+        COUNT(*) FILTER (
+            WHERE event_type = 'cancellation_requested'
+        ) AS cancellation_requests,
+
+
+        COUNT(*) FILTER (
+            WHERE event_type = 'subscription_ended'
+        ) AS subscription_ended_events,
+
+
+        COUNT(*) FILTER (
+            WHERE event_type = 'past_due_started'
+        ) AS past_due_started,
+
+
+        COUNT(*) FILTER (
+            WHERE event_type = 'past_due_resolved'
+        ) AS past_due_resolved
+
+
+    FROM subscription_events
+
+    GROUP BY 1
+),
+
+
+-- ============================================================
+-- 9. MONTHLY PAYMENT PERFORMANCE
+-- ============================================================
+
+monthly_payments AS (
+
+    SELECT
+
+        payment_month::date AS month_start,
+
+
+        COUNT(*)
+            AS payment_attempts,
+
+
+        SUM(successful_payment_flag)
+            AS successful_payments,
+
+
+        SUM(failed_payment_flag)
+            AS failed_payments,
+
+
+        SUM(successful_payment_value)
+            AS successful_payment_value,
+
+
+        SUM(successful_payment_value) FILTER (
+            WHERE subscriber_type = 'individual'
+        ) AS individual_successful_payment_value,
+
+
+        SUM(successful_payment_value) FILTER (
+            WHERE subscriber_type = 'organisation'
+        ) AS organisation_successful_payment_value
+
+
+    FROM vw_payment_fact
+
+    GROUP BY 1
+)
+
+
+-- ============================================================
+-- 10. FINAL MONTHLY ANALYTICAL OUTPUT
+-- ============================================================
+
+SELECT
+
+    m.month_start,
+    m.month_end,
+
+
+    -- ========================================================
+    -- ACQUISITION / SUBSCRIPTION STARTS
+    -- ========================================================
+
+    COALESCE(
+        ss.subscription_records_started,
+        0
+    ) AS subscription_records_started,
+
+
+    COALESCE(
+        ss.first_time_paid_subscribers,
+        0
+    ) AS first_time_paid_subscribers,
+
+
+    COALESCE(
+        ss.first_time_individual_subscribers,
+        0
+    ) AS first_time_individual_subscribers,
+
+
+    COALESCE(
+        ss.first_time_organisation_subscribers,
+        0
+    ) AS first_time_organisation_subscribers,
+
+
+    COALESCE(
+        ss.individual_subscription_records_started,
+        0
+    ) AS individual_subscription_records_started,
+
+
+    COALESCE(
+        ss.organisation_subscription_records_started,
+        0
+    ) AS organisation_subscription_records_started,
+
+
+    -- ========================================================
+    -- SUBSCRIPTION ENDS
+    -- ========================================================
+
+    COALESCE(
+        se.subscription_records_ended,
+        0
+    ) AS subscription_records_ended,
+
+
+    COALESCE(
+        se.voluntary_cancellation_ends,
+        0
+    ) AS voluntary_cancellation_ends,
+
+
+    COALESCE(
+        se.non_renewal_ends,
+        0
+    ) AS non_renewal_ends,
+
+
+    COALESCE(
+        se.plan_change_ends,
+        0
+    ) AS plan_change_ends,
+
+
+    -- ========================================================
+    -- MONTH-END ACTIVE BASE
+    -- ========================================================
+
+    COALESCE(
+        ma.active_subscription_records,
+        0
+    ) AS active_subscription_records,
+
+
+    COALESCE(
+        ma.active_subscribers,
+        0
+    ) AS active_subscribers,
+
+
+    COALESCE(
+        ma.active_individual_subscriptions,
+        0
+    ) AS active_individual_subscriptions,
+
+
+    COALESCE(
+        ma.active_organisation_subscriptions,
+        0
+    ) AS active_organisation_subscriptions,
+
+
+    COALESCE(
+        ma.active_individual_subscribers,
+        0
+    ) AS active_individual_subscribers,
+
+
+    COALESCE(
+        ma.active_organisation_subscribers,
+        0
+    ) AS active_organisation_subscribers,
+
+
+    -- ========================================================
+    -- LIFECYCLE EVENTS
+    -- ========================================================
+
+    COALESCE(
+        me.subscription_started_events,
+        0
+    ) AS subscription_started_events,
+
+
+    COALESCE(
+        me.renewals,
+        0
+    ) AS renewals,
+
+
+    COALESCE(
+        me.plan_changes,
+        0
+    ) AS plan_changes,
+
+
+    COALESCE(
+        me.reactivations,
+        0
+    ) AS reactivations,
+
+
+    COALESCE(
+        me.cancellation_requests,
+        0
+    ) AS cancellation_requests,
+
+
+    COALESCE(
+        me.subscription_ended_events,
+        0
+    ) AS subscription_ended_events,
+
+
+    COALESCE(
+        me.past_due_started,
+        0
+    ) AS past_due_started,
+
+
+    COALESCE(
+        me.past_due_resolved,
+        0
+    ) AS past_due_resolved,
+
+
+    -- ========================================================
+    -- PAYMENT PERFORMANCE
+    -- ========================================================
+
+    COALESCE(
+        mp.payment_attempts,
+        0
+    ) AS payment_attempts,
+
+
+    COALESCE(
+        mp.successful_payments,
+        0
+    ) AS successful_payments,
+
+
+    COALESCE(
+        mp.failed_payments,
+        0
+    ) AS failed_payments,
+
+
+    CASE
+
+        WHEN COALESCE(
+            mp.payment_attempts,
+            0
+        ) = 0
+
+            THEN 0::numeric
+
+        ELSE ROUND(
+
+            (
+                COALESCE(
+                    mp.failed_payments,
+                    0
+                )::numeric
+
+                / mp.payment_attempts
+            ) * 100,
+
+            2
+        )
+
+    END AS payment_failure_rate_pct,
+
+
+    COALESCE(
+        mp.successful_payment_value,
+        0
+    ) AS successful_payment_value,
+
+
+    COALESCE(
+        mp.individual_successful_payment_value,
+        0
+    ) AS individual_successful_payment_value,
+
+
+    COALESCE(
+        mp.organisation_successful_payment_value,
+        0
+    ) AS organisation_successful_payment_value
+
+
+FROM months AS m
+
+
+LEFT JOIN subscription_starts AS ss
+    ON m.month_start = ss.month_start
+
+
+LEFT JOIN subscription_ends AS se
+    ON m.month_start = se.month_start
+
+
+LEFT JOIN month_end_active AS ma
+    ON m.month_start = ma.month_start
+
+
+LEFT JOIN monthly_events AS me
+    ON m.month_start = me.month_start
+
+
+LEFT JOIN monthly_payments AS mp
+    ON m.month_start = mp.month_start
+
+
+ORDER BY m.month_start;
