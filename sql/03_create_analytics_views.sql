@@ -1803,3 +1803,414 @@ LEFT JOIN first_touch_outcomes AS fto
 ORDER BY
     paid_subscribers DESC,
     ca.channel;
+
+-- ============================================================
+-- ANALYTICS VIEW 06: SUBSCRIPTION COHORTS
+--
+-- Grain:
+-- One row per:
+-- cohort month
+-- × observation month
+-- × subscriber type
+-- × initial product
+-- × initial billing frequency
+--
+-- Purpose:
+-- Track how first-time paid subscriber cohorts remain active
+-- over subsequent calendar months.
+--
+-- Important:
+-- This measures month-end active rate.
+-- Reactivated subscribers count as active again if they have
+-- an active subscription at the relevant month-end.
+-- ============================================================
+
+CREATE OR REPLACE VIEW vw_subscription_cohorts AS
+
+WITH
+
+
+-- ============================================================
+-- 1. COMMON SUBSCRIBER KEY
+-- ============================================================
+
+subscription_base AS (
+
+    SELECT
+
+        sf.*,
+
+        CASE
+
+            WHEN sf.organisation_id IS NOT NULL
+                THEN 'ORG:' || sf.organisation_id
+
+            ELSE 'CUST:' || sf.customer_id
+
+        END AS subscriber_key
+
+    FROM vw_subscription_fact AS sf
+),
+
+
+-- ============================================================
+-- 2. RANK EACH SUBSCRIBER'S SUBSCRIPTIONS
+--
+-- This identifies the first subscription record and therefore
+-- the subscriber's original product / billing configuration.
+-- ============================================================
+
+ranked_subscriptions AS (
+
+    SELECT
+
+        sb.*,
+
+        ROW_NUMBER() OVER (
+
+            PARTITION BY sb.subscriber_key
+
+            ORDER BY
+                sb.subscription_start_date,
+                sb.subscription_id
+
+        ) AS subscription_rank
+
+    FROM subscription_base AS sb
+),
+
+
+-- ============================================================
+-- 3. COHORT MEMBERS
+--
+-- Exactly one row per subscriber.
+-- Cohort month = month of first paid subscription.
+-- ============================================================
+
+cohort_members AS (
+
+    SELECT
+
+        subscriber_key,
+
+        subscriber_type,
+
+        subscription_start_date
+            AS first_subscription_start_date,
+
+        DATE_TRUNC(
+            'month',
+            subscription_start_date
+        )::date AS cohort_month,
+
+        product_id
+            AS initial_product_id,
+
+        product_name
+            AS initial_product_name,
+
+        product_family
+            AS initial_product_family,
+
+        plan_id
+            AS initial_plan_id,
+
+        plan_name
+            AS initial_plan_name,
+
+        billing_frequency
+            AS initial_billing_frequency
+
+    FROM ranked_subscriptions
+
+    WHERE subscription_rank = 1
+),
+
+
+-- ============================================================
+-- 4. COHORT SIZES
+-- ============================================================
+
+cohort_sizes AS (
+
+    SELECT
+
+        cohort_month,
+        subscriber_type,
+
+        initial_product_id,
+        initial_product_name,
+        initial_product_family,
+
+        initial_plan_id,
+        initial_plan_name,
+        initial_billing_frequency,
+
+        COUNT(*)
+            AS cohort_size
+
+    FROM cohort_members
+
+    GROUP BY
+        cohort_month,
+        subscriber_type,
+        initial_product_id,
+        initial_product_name,
+        initial_product_family,
+        initial_plan_id,
+        initial_plan_name,
+        initial_billing_frequency
+),
+
+
+-- ============================================================
+-- 5. OBSERVATION MONTHS
+--
+-- Reuse the reporting calendar already validated in View 04.
+-- ============================================================
+
+observation_months AS (
+
+    SELECT
+
+        month_start AS observation_month,
+        month_end AS observation_month_end
+
+    FROM vw_monthly_subscription_metrics
+),
+
+
+-- ============================================================
+-- 6. MONTH-END ACTIVE MEMBERS
+--
+-- Each cohort member is evaluated at each month-end from their
+-- cohort month onward.
+--
+-- EXISTS prevents multiple active subscription records from
+-- accidentally counting the same subscriber more than once.
+-- ============================================================
+
+active_cohort_members AS (
+
+    SELECT
+
+        cm.cohort_month,
+        om.observation_month,
+
+        cm.subscriber_type,
+
+        cm.initial_product_id,
+        cm.initial_product_name,
+        cm.initial_product_family,
+
+        cm.initial_plan_id,
+        cm.initial_plan_name,
+        cm.initial_billing_frequency,
+
+        COUNT(*)
+            AS active_subscribers
+
+    FROM cohort_members AS cm
+
+
+    INNER JOIN observation_months AS om
+
+        ON om.observation_month >= cm.cohort_month
+
+
+    WHERE EXISTS (
+
+        SELECT 1
+
+        FROM subscription_base AS sb
+
+        WHERE sb.subscriber_key = cm.subscriber_key
+
+          AND sb.subscription_start_date
+                <= om.observation_month_end
+
+          AND (
+
+                sb.subscription_end_date IS NULL
+
+                OR sb.subscription_end_date
+                    >= om.observation_month_end
+          )
+    )
+
+
+    GROUP BY
+        cm.cohort_month,
+        om.observation_month,
+        cm.subscriber_type,
+        cm.initial_product_id,
+        cm.initial_product_name,
+        cm.initial_product_family,
+        cm.initial_plan_id,
+        cm.initial_plan_name,
+        cm.initial_billing_frequency
+),
+
+
+-- ============================================================
+-- 7. COMPLETE COHORT GRID
+--
+-- Ensure cohort/month combinations still appear even if no
+-- subscribers from that cohort remain active.
+-- ============================================================
+
+cohort_grid AS (
+
+    SELECT
+
+        cs.cohort_month,
+        om.observation_month,
+
+        cs.subscriber_type,
+
+        cs.initial_product_id,
+        cs.initial_product_name,
+        cs.initial_product_family,
+
+        cs.initial_plan_id,
+        cs.initial_plan_name,
+        cs.initial_billing_frequency,
+
+        cs.cohort_size
+
+    FROM cohort_sizes AS cs
+
+
+    INNER JOIN observation_months AS om
+
+        ON om.observation_month >= cs.cohort_month
+)
+
+
+-- ============================================================
+-- 8. FINAL COHORT OUTPUT
+-- ============================================================
+
+SELECT
+
+    cg.cohort_month,
+    cg.observation_month,
+
+
+    -- ========================================================
+    -- COHORT AGE
+    -- ========================================================
+
+    (
+        (
+            EXTRACT(
+                YEAR FROM cg.observation_month
+            )
+
+            -
+
+            EXTRACT(
+                YEAR FROM cg.cohort_month
+            )
+        ) * 12
+
+        +
+
+        (
+            EXTRACT(
+                MONTH FROM cg.observation_month
+            )
+
+            -
+
+            EXTRACT(
+                MONTH FROM cg.cohort_month
+            )
+        )
+
+    )::integer AS months_since_acquisition,
+
+
+    -- ========================================================
+    -- STARTING SEGMENT
+    -- ========================================================
+
+    cg.subscriber_type,
+
+    cg.initial_product_id,
+    cg.initial_product_name,
+    cg.initial_product_family,
+
+    cg.initial_plan_id,
+    cg.initial_plan_name,
+    cg.initial_billing_frequency,
+
+
+    -- ========================================================
+    -- COHORT PERFORMANCE
+    -- ========================================================
+
+    cg.cohort_size,
+
+
+    COALESCE(
+        acm.active_subscribers,
+        0
+    ) AS active_subscribers,
+
+
+    (
+        cg.cohort_size
+        -
+        COALESCE(
+            acm.active_subscribers,
+            0
+        )
+    ) AS inactive_subscribers,
+
+
+    ROUND(
+
+        (
+            COALESCE(
+                acm.active_subscribers,
+                0
+            )::numeric
+
+            /
+
+            NULLIF(
+                cg.cohort_size,
+                0
+            )
+
+        ) * 100,
+
+        2
+
+    ) AS month_end_active_rate_pct
+
+
+FROM cohort_grid AS cg
+
+
+LEFT JOIN active_cohort_members AS acm
+
+    ON cg.cohort_month = acm.cohort_month
+
+    AND cg.observation_month
+        = acm.observation_month
+
+    AND cg.subscriber_type
+        = acm.subscriber_type
+
+    AND cg.initial_plan_id
+        = acm.initial_plan_id
+
+
+ORDER BY
+    cg.cohort_month,
+    cg.observation_month,
+    cg.subscriber_type,
+    cg.initial_product_name,
+    cg.initial_plan_name;
