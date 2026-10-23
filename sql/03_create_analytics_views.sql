@@ -2214,3 +2214,555 @@ ORDER BY
     cg.subscriber_type,
     cg.initial_product_name,
     cg.initial_plan_name;
+
+-- ============================================================
+-- ANALYTICS VIEW 07: ORGANISATION PERFORMANCE
+--
+-- Grain:
+-- One row per organisation_id
+--
+-- Purpose:
+-- Analyse institutional subscription adoption, seat penetration,
+-- payment behaviour, lifecycle activity and revenue concentration.
+-- ============================================================
+
+CREATE OR REPLACE VIEW vw_organisation_performance AS
+
+WITH
+
+
+-- ============================================================
+-- 1. ORGANISATION SUBSCRIPTION SUMMARY
+-- ============================================================
+
+subscription_summary AS (
+
+    SELECT
+
+        organisation_id,
+
+        COUNT(*)
+            AS total_subscription_records,
+
+        COUNT(*) FILTER (
+            WHERE subscription_status = 'active'
+        ) AS active_subscription_records,
+
+        COUNT(*) FILTER (
+            WHERE subscription_status = 'ended'
+        ) AS ended_subscription_records,
+
+        COUNT(*) FILTER (
+            WHERE end_reason = 'voluntary_cancel'
+        ) AS voluntary_cancellations,
+
+        COUNT(*) FILTER (
+            WHERE end_reason = 'non_renewal'
+        ) AS non_renewals,
+
+        COUNT(*) FILTER (
+            WHERE end_reason = 'plan_change'
+        ) AS plan_change_terminations,
+
+        COUNT(DISTINCT plan_id)
+            AS distinct_plans_used,
+
+        COUNT(DISTINCT product_id)
+            AS distinct_products_used,
+
+        MIN(subscription_start_date)
+            AS first_subscription_start_date,
+
+        MAX(subscription_start_date)
+            AS latest_subscription_start_date,
+
+        MAX(subscription_end_date)
+            AS latest_subscription_end_date,
+
+        MAX(seats_purchased)
+            AS max_seats_purchased,
+
+        SUM(seats_purchased) FILTER (
+            WHERE subscription_status = 'active'
+        ) AS current_active_seats
+
+    FROM vw_subscription_fact
+
+    WHERE organisation_id IS NOT NULL
+
+    GROUP BY organisation_id
+),
+
+
+-- ============================================================
+-- 2. LATEST SUBSCRIPTION RECORD
+--
+-- Gives us the organisation's most recent commercial
+-- configuration without assuming it has only one historical
+-- subscription.
+-- ============================================================
+
+ranked_subscriptions AS (
+
+    SELECT
+
+        organisation_id,
+        plan_id,
+        plan_name,
+        product_id,
+        product_name,
+        product_family,
+        billing_frequency,
+        seats_purchased,
+        subscription_status,
+
+        ROW_NUMBER() OVER (
+
+            PARTITION BY organisation_id
+
+            ORDER BY
+                subscription_start_date DESC,
+                subscription_id DESC
+
+        ) AS subscription_rank
+
+    FROM vw_subscription_fact
+
+    WHERE organisation_id IS NOT NULL
+),
+
+
+latest_subscription AS (
+
+    SELECT
+
+        organisation_id,
+
+        plan_id
+            AS latest_plan_id,
+
+        plan_name
+            AS latest_plan_name,
+
+        product_id
+            AS latest_product_id,
+
+        product_name
+            AS latest_product_name,
+
+        product_family
+            AS latest_product_family,
+
+        billing_frequency
+            AS latest_billing_frequency,
+
+        seats_purchased
+            AS latest_seats_purchased,
+
+        subscription_status
+            AS latest_subscription_status
+
+    FROM ranked_subscriptions
+
+    WHERE subscription_rank = 1
+),
+
+
+-- ============================================================
+-- 3. ORGANISATION PAYMENT SUMMARY
+-- ============================================================
+
+payment_summary AS (
+
+    SELECT
+
+        organisation_id,
+
+        COUNT(*)
+            AS total_payment_attempts,
+
+        SUM(successful_payment_flag)
+            AS successful_payments,
+
+        SUM(failed_payment_flag)
+            AS failed_payments,
+
+        ROUND(
+            SUM(successful_payment_value),
+            2
+        ) AS observed_successful_payment_value,
+
+        MIN(payment_attempted_at) FILTER (
+            WHERE payment_status = 'successful'
+        ) AS first_successful_payment_at,
+
+        MAX(payment_attempted_at) FILTER (
+            WHERE payment_status = 'successful'
+        ) AS latest_successful_payment_at
+
+    FROM vw_payment_fact
+
+    WHERE organisation_id IS NOT NULL
+
+    GROUP BY organisation_id
+),
+
+
+-- ============================================================
+-- 4. ORGANISATION EVENT SUMMARY
+-- ============================================================
+
+event_summary AS (
+
+    SELECT
+
+        sf.organisation_id,
+
+        COUNT(*) FILTER (
+            WHERE se.event_type = 'renewed'
+        ) AS renewal_events,
+
+        COUNT(*) FILTER (
+            WHERE se.event_type = 'plan_changed'
+        ) AS plan_change_events,
+
+        COUNT(*) FILTER (
+            WHERE se.event_type = 'reactivated'
+        ) AS reactivation_events,
+
+        COUNT(*) FILTER (
+            WHERE se.event_type = 'cancellation_requested'
+        ) AS cancellation_requested_events,
+
+        COUNT(*) FILTER (
+            WHERE se.event_type = 'past_due_started'
+        ) AS past_due_started_events,
+
+        COUNT(*) FILTER (
+            WHERE se.event_type = 'past_due_resolved'
+        ) AS past_due_resolved_events
+
+    FROM subscription_events AS se
+
+    INNER JOIN vw_subscription_fact AS sf
+        ON se.subscription_id = sf.subscription_id
+
+    WHERE sf.organisation_id IS NOT NULL
+
+    GROUP BY sf.organisation_id
+),
+
+
+-- ============================================================
+-- 5. BASE ORGANISATION PERFORMANCE
+-- ============================================================
+
+organisation_base AS (
+
+    SELECT
+
+        -- ORGANISATION PROFILE
+
+        o.organisation_id,
+        o.organisation_name,
+        o.organisation_type,
+        o.industry,
+        o.organisation_size,
+        o.signup_date,
+        o.account_status,
+
+
+        -- SUBSCRIPTION ADOPTION
+
+        (
+            COALESCE(
+                ss.total_subscription_records,
+                0
+            ) > 0
+        ) AS ever_subscribed,
+
+        (
+            COALESCE(
+                ss.active_subscription_records,
+                0
+            ) > 0
+        ) AS current_subscriber,
+
+        COALESCE(
+            ss.total_subscription_records,
+            0
+        ) AS total_subscription_records,
+
+        COALESCE(
+            ss.active_subscription_records,
+            0
+        ) AS active_subscription_records,
+
+        COALESCE(
+            ss.ended_subscription_records,
+            0
+        ) AS ended_subscription_records,
+
+        ss.first_subscription_start_date,
+        ss.latest_subscription_start_date,
+        ss.latest_subscription_end_date,
+
+
+        -- PLAN / PRODUCT HISTORY
+
+        COALESCE(
+            ss.distinct_plans_used,
+            0
+        ) AS distinct_plans_used,
+
+        COALESCE(
+            ss.distinct_products_used,
+            0
+        ) AS distinct_products_used,
+
+        ls.latest_plan_id,
+        ls.latest_plan_name,
+        ls.latest_product_id,
+        ls.latest_product_name,
+        ls.latest_product_family,
+        ls.latest_billing_frequency,
+        ls.latest_subscription_status,
+
+
+        -- SEAT ADOPTION
+
+        COALESCE(
+            ss.max_seats_purchased,
+            0
+        ) AS max_seats_purchased,
+
+        COALESCE(
+            ss.current_active_seats,
+            0
+        ) AS current_active_seats,
+
+        ROUND(
+
+            (
+                COALESCE(
+                    ss.max_seats_purchased,
+                    0
+                )::numeric
+
+                /
+
+                NULLIF(
+                    o.organisation_size,
+                    0
+                )
+
+            ) * 100,
+
+            2
+
+        ) AS max_seat_penetration_pct,
+
+        ROUND(
+
+            (
+                COALESCE(
+                    ss.current_active_seats,
+                    0
+                )::numeric
+
+                /
+
+                NULLIF(
+                    o.organisation_size,
+                    0
+                )
+
+            ) * 100,
+
+            2
+
+        ) AS current_seat_penetration_pct,
+
+
+        -- TERMINATION HISTORY
+
+        COALESCE(
+            ss.voluntary_cancellations,
+            0
+        ) AS voluntary_cancellations,
+
+        COALESCE(
+            ss.non_renewals,
+            0
+        ) AS non_renewals,
+
+        COALESCE(
+            ss.plan_change_terminations,
+            0
+        ) AS plan_change_terminations,
+
+
+        -- PAYMENT PERFORMANCE
+
+        COALESCE(
+            ps.total_payment_attempts,
+            0
+        ) AS total_payment_attempts,
+
+        COALESCE(
+            ps.successful_payments,
+            0
+        ) AS successful_payments,
+
+        COALESCE(
+            ps.failed_payments,
+            0
+        ) AS failed_payments,
+
+        CASE
+
+            WHEN COALESCE(
+                ps.total_payment_attempts,
+                0
+            ) = 0
+
+                THEN NULL
+
+            ELSE ROUND(
+
+                (
+                    COALESCE(
+                        ps.failed_payments,
+                        0
+                    )::numeric
+
+                    /
+
+                    ps.total_payment_attempts
+
+                ) * 100,
+
+                2
+            )
+
+        END AS payment_failure_rate_pct,
+
+        COALESCE(
+            ps.observed_successful_payment_value,
+            0
+        ) AS observed_successful_payment_value,
+
+        ps.first_successful_payment_at,
+        ps.latest_successful_payment_at,
+
+
+        -- LIFECYCLE EVENTS
+
+        COALESCE(
+            es.renewal_events,
+            0
+        ) AS renewal_events,
+
+        COALESCE(
+            es.plan_change_events,
+            0
+        ) AS plan_change_events,
+
+        COALESCE(
+            es.reactivation_events,
+            0
+        ) AS reactivation_events,
+
+        COALESCE(
+            es.cancellation_requested_events,
+            0
+        ) AS cancellation_requested_events,
+
+        COALESCE(
+            es.past_due_started_events,
+            0
+        ) AS past_due_started_events,
+
+        COALESCE(
+            es.past_due_resolved_events,
+            0
+        ) AS past_due_resolved_events
+
+
+    FROM organisations AS o
+
+
+    LEFT JOIN subscription_summary AS ss
+        ON o.organisation_id = ss.organisation_id
+
+
+    LEFT JOIN latest_subscription AS ls
+        ON o.organisation_id = ls.organisation_id
+
+
+    LEFT JOIN payment_summary AS ps
+        ON o.organisation_id = ps.organisation_id
+
+
+    LEFT JOIN event_summary AS es
+        ON o.organisation_id = es.organisation_id
+)
+
+
+-- ============================================================
+-- 6. FINAL OUTPUT
+--
+-- Revenue share and rank are calculated only after each
+-- organisation has been reduced to one row.
+-- ============================================================
+
+SELECT
+
+    ob.*,
+
+
+    -- ========================================================
+    -- ENTERPRISE REVENUE CONCENTRATION
+    -- ========================================================
+
+    ROUND(
+
+        (
+            ob.observed_successful_payment_value
+
+            /
+
+            NULLIF(
+                SUM(
+                    ob.observed_successful_payment_value
+                ) OVER (),
+                0
+            )
+
+        ) * 100,
+
+        2
+
+    ) AS organisation_revenue_share_pct,
+
+
+    CASE
+
+        WHEN ob.ever_subscribed = TRUE
+
+            THEN RANK() OVER (
+
+                ORDER BY
+                    ob.observed_successful_payment_value DESC
+            )
+
+        ELSE NULL
+
+    END AS organisation_revenue_rank
+
+
+FROM organisation_base AS ob
+
+ORDER BY
+    observed_successful_payment_value DESC,
+    organisation_name;
