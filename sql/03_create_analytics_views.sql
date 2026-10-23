@@ -2766,3 +2766,324 @@ FROM organisation_base AS ob
 ORDER BY
     observed_successful_payment_value DESC,
     organisation_name;
+
+-- ============================================================
+-- ANALYTICS VIEW 08: RECURRING REVENUE FACT
+--
+-- Grain:
+-- One row per active subscription per month-end
+--
+-- Purpose:
+-- Calculate normalized recurring revenue run-rate for every
+-- subscription active at the end of each reporting month.
+--
+-- Important:
+-- MRR / ARR are contractual run-rate metrics.
+-- They are NOT equivalent to cash collected in the period.
+-- ============================================================
+
+CREATE OR REPLACE VIEW vw_recurring_revenue_fact AS
+
+WITH
+
+
+-- ============================================================
+-- 1. REPORTING MONTHS
+--
+-- Reuse the validated reporting calendar from View 04.
+-- ============================================================
+
+months AS (
+
+    SELECT
+        month_start,
+        month_end
+
+    FROM vw_monthly_subscription_metrics
+),
+
+
+-- ============================================================
+-- 2. PRICE EACH SUBSCRIPTION
+--
+-- Individuals:
+--     billing-period value = plan unit price
+--
+-- Organisations:
+--     billing-period value = progressive seat pricing
+-- ============================================================
+
+priced_subscriptions AS (
+
+    SELECT
+
+        sf.subscription_id,
+        sf.customer_id,
+        sf.organisation_id,
+
+        CASE
+            WHEN sf.organisation_id IS NOT NULL
+                THEN 'ORG:' || sf.organisation_id
+            ELSE 'CUST:' || sf.customer_id
+        END AS subscriber_key,
+
+        sf.subscriber_type,
+
+        sf.subscription_start_date,
+        sf.subscription_end_date,
+        sf.subscription_status,
+
+        sf.seats_purchased,
+
+        sf.plan_id,
+        sf.plan_name,
+        sf.billing_frequency,
+        sf.unit_price,
+        sf.plan_currency,
+
+        sf.product_id,
+        sf.product_name,
+        sf.product_family,
+        sf.target_segment,
+
+        sf.organisation_name,
+        sf.organisation_type,
+
+
+        -- ====================================================
+        -- PRICING MODEL
+        -- ====================================================
+
+        CASE
+            WHEN sf.subscriber_type = 'organisation'
+                THEN 'progressive_seat_pricing'
+
+            ELSE 'retail_plan_price'
+        END AS pricing_model,
+
+
+        -- ====================================================
+        -- BILLING-PERIOD CONTRACT VALUE
+        --
+        -- For individuals this is simply the plan price.
+        --
+        -- For organisations this applies the progressive
+        -- enterprise seat-pricing model.
+        -- ====================================================
+
+        CASE
+
+            WHEN sf.subscriber_type = 'organisation'
+
+                THEN
+
+                    LEAST(
+                        COALESCE(sf.seats_purchased, 0),
+                        49
+                    ) * sf.unit_price
+
+
+                    +
+
+                    GREATEST(
+
+                        LEAST(
+                            COALESCE(sf.seats_purchased, 0) - 49,
+                            50
+                        ),
+
+                        0
+
+                    ) * sf.unit_price * 0.60
+
+
+                    +
+
+                    GREATEST(
+
+                        LEAST(
+                            COALESCE(sf.seats_purchased, 0) - 99,
+                            150
+                        ),
+
+                        0
+
+                    ) * sf.unit_price * 0.40
+
+
+                    +
+
+                    GREATEST(
+
+                        LEAST(
+                            COALESCE(sf.seats_purchased, 0) - 249,
+                            250
+                        ),
+
+                        0
+
+                    ) * sf.unit_price * 0.25
+
+
+                    +
+
+                    GREATEST(
+
+                        LEAST(
+                            COALESCE(sf.seats_purchased, 0) - 499,
+                            500
+                        ),
+
+                        0
+
+                    ) * sf.unit_price * 0.15
+
+
+                    +
+
+                    GREATEST(
+                        COALESCE(sf.seats_purchased, 0) - 999,
+                        0
+                    ) * sf.unit_price * 0.10
+
+
+            ELSE sf.unit_price
+
+        END AS billing_period_contract_value,
+
+
+        -- ====================================================
+        -- MONTHLY NORMALIZATION FACTOR
+        -- ====================================================
+
+        CASE sf.billing_frequency
+
+            WHEN 'Daily'
+                THEN 365::numeric / 12
+
+            WHEN 'Weekly'
+                THEN 52::numeric / 12
+
+            WHEN 'Monthly'
+                THEN 1::numeric
+
+            WHEN 'Annual'
+                THEN 1::numeric / 12
+
+            ELSE NULL
+
+        END AS monthly_normalization_factor
+
+
+    FROM vw_subscription_fact AS sf
+),
+
+
+-- ============================================================
+-- 3. ACTIVE SUBSCRIPTIONS BY MONTH-END
+-- ============================================================
+
+active_monthly_subscriptions AS (
+
+    SELECT
+
+        m.month_start,
+        m.month_end,
+
+        ps.*
+
+    FROM months AS m
+
+
+    INNER JOIN priced_subscriptions AS ps
+
+        ON ps.subscription_start_date <= m.month_end
+
+        AND (
+
+            ps.subscription_end_date IS NULL
+
+            OR ps.subscription_end_date >= m.month_end
+
+        )
+)
+
+
+-- ============================================================
+-- 4. FINAL RECURRING REVENUE FACT
+-- ============================================================
+
+SELECT
+
+    month_start,
+    month_end,
+
+    subscription_id,
+    subscriber_key,
+    subscriber_type,
+
+    customer_id,
+    organisation_id,
+    organisation_name,
+    organisation_type,
+
+    subscription_start_date,
+    subscription_end_date,
+    subscription_status,
+
+    seats_purchased,
+
+    product_id,
+    product_name,
+    product_family,
+    target_segment,
+
+    plan_id,
+    plan_name,
+    billing_frequency,
+
+    unit_price,
+    plan_currency,
+
+    pricing_model,
+
+
+    -- CONTRACT VALUE FOR ONE BILLING PERIOD
+
+    ROUND(
+        billing_period_contract_value,
+        2
+    ) AS billing_period_contract_value,
+
+
+    -- NORMALIZED MONTHLY RECURRING REVENUE
+
+    ROUND(
+
+        billing_period_contract_value
+        * monthly_normalization_factor,
+
+        2
+
+    ) AS normalized_mrr,
+
+
+    -- ANNUALIZED RECURRING REVENUE RUN-RATE
+
+    ROUND(
+
+        billing_period_contract_value
+        * monthly_normalization_factor
+        * 12,
+
+        2
+
+    ) AS annualized_recurring_revenue
+
+
+FROM active_monthly_subscriptions
+
+ORDER BY
+    month_start,
+    subscriber_type,
+    subscription_id;
